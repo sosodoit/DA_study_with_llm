@@ -11,7 +11,9 @@ import os
 
 #------------------------ 환경 설정 ------------------------#
 # API KEY 설정 
-os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+# os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+from dotenv import load_dotenv
+load_dotenv()
 
 # streamlit에서 하나의 실행이 곧 페이지 새로고침(초기화)
 # 우리의 대화를 기억할 수 있도록 수동 조정 필요
