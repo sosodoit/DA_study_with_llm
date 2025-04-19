@@ -9,8 +9,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 from content_loader import get_article_content
 from gpt_analyzer import analyze_article_with_rag
-from langchain.schema import Document
 from multiprocessing import Pool, cpu_count
+from collections import defaultdict
 
 #------------------------ 환경 설정 ------------------------#
 load_dotenv()
@@ -45,8 +45,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 def get_news(query, start):
     """네이버 검색 API 뉴스 데이터 가져오기"""
     headers = {
+        'User-Agent': USER_AGENT,
         'X-Naver-Client-Id': CLIENT_ID,
-        'X-Naver-Client-Secret': CLIENT_SECRET
+        'X-Naver-Client-Secret': CLIENT_SECRET,        
     }
     params = {
         'query': f"{query}",
@@ -84,11 +85,14 @@ def filter_domain(df):
     return df
 
 # 기능 추가 : 특정 년월로 필터링한 뉴스만 수집 및 저장
+# 기능 추가 : 키워드별 중복 뉴스 처리
 # 수집 단계
-def collect_articles(keywords, target_date):
+def collect_articles(keywords, target_date=None):
     """전체 키워드에 대해 뉴스 수집"""
-    articles = []    
-    # existing_df, existing_links = load_existing_links(OUTPUT_FILE)
+    
+    link_map = defaultdict(lambda: {
+        "keywords": set()
+    })
 
     for keyword in keywords:
         print(f"키워드 '{keyword}'로 데이터 수집 시작...")
@@ -99,42 +103,53 @@ def collect_articles(keywords, target_date):
             if data and 'items' in data:
                 for item in data['items']:
                     link = item['link']
-                    # if link in existing_links:
-                    #     continue  # 중복된 뉴스는 건너뛰기
                     pub_date = email.utils.parsedate_to_datetime(item['pubDate'])
                     year_month = pub_date.strftime("%Y-%m")
-                    if year_month != target_date:
-                        continue 
-                    articles.append({
-                        "keyword": keyword,
-                        "title": item['title'],
-                        "link": item['link'],
-                        "description": item['description'],
-                        "pubDate": pub_date.strftime("%Y-%m-%d %H:%M:%S"),
-                        "loadDate": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
+                    
+                    if target_date:
+                        if year_month != target_date:
+                            continue 
+                    
+                    link = item['link']
+                    link_map[link]['title'] = item['title']
+                    link_map[link]['description'] = item['description']
+                    link_map[link]['pubDate'] = pub_date.strftime("%Y-%m-%d %H:%M:%S")
+                    link_map[link]['loadDate'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    link_map[link]['keywords'].add(keyword)
             else:
                 break  # 더 이상 결과가 없으면 중단
 
-            time.sleep(0.3)
+            time.sleep(0.5)
 
     # 데이터 저장
-    if articles:
+    if link_map:
+        articles = []
+        for link, content in link_map.items():
+            articles.append({                
+                "title": content['title'],                
+                "description": content['description'],
+                "link": link,
+                "keyword": ", ".join(sorted(content["keywords"])),
+                "pubDate": content['pubDate'],
+                "loadDate": content['loadDate']
+            })
         df = pd.DataFrame(articles)
-        # new_df = pd.concat([existing_df, df], ignore_index=True)
-        
-        # 네이버 도메인 필터링
-        new_df = filter_domain(df)
+        new_df = filter_domain(df) # 네이버 도메인 필터링        
+        new_df = new_df.drop_duplicates(subset="link") # 최종 중복 제거   
 
-        # 최종 중복 제거
-        new_df = new_df.drop_duplicates(subset="link")        
-        
-        filename = os.path.join(DATA_DIR, f"{target_date}_news_raw.csv")
-        df.to_csv(filename, index=False, encoding='utf-8-sig')
-        print(f"뉴스 수집 완료: {len(df)}건 저장됨 → {filename}")
+        # 새로운 데이터 마스터 파일에 병합
+        MASTER_FILE = os.path.join("data", "news_raw.csv")  
+        if os.path.exists(MASTER_FILE):
+            existing_df = pd.read_csv(MASTER_FILE)
+            combined = pd.concat([existing_df, new_df], ignore_index=True)
+            combined = combined.drop_duplicates(subset="link")
+        else:
+            combined = new_df
+        combined.to_csv(MASTER_FILE, index=False, encoding='utf-8-sig')
+        print(f"뉴스 수집 완료: {len(df)}건 저장됨 → {MASTER_FILE}")
 
     else:
-        print(f"새로운 기사가 없습니다.")
+        print(f"조건에 맞는 새로운 뉴스가 없습니다.")
 
 # 병렬 처리 함수
 def process_row(row):
@@ -184,7 +199,7 @@ if __name__ == "__main__":
         help="추가적으로 수집할 키워드 리스트 (예: --extra '금융 범죄 고수익보장' '당일 대출')"
     )
     parser.add_argument(
-        "--month", type=str, required=True, 
+        "--month", nargs="*", type=str, default=[], 
         help="수집할 연월 (예: 2024-04)"
     )
     parser.add_argument(
