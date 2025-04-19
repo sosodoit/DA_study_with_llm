@@ -134,6 +134,7 @@ def collect_articles(keywords, target_date=None):
                 "loadDate": content['loadDate']
             })
         df = pd.DataFrame(articles)
+        df['is_flag'] = 'N'
         new_df = filter_domain(df) # 네이버 도메인 필터링        
         new_df = new_df.drop_duplicates(subset="link") # 최종 중복 제거   
 
@@ -151,43 +152,44 @@ def collect_articles(keywords, target_date=None):
     else:
         print(f"조건에 맞는 새로운 뉴스가 없습니다.")
 
-# 병렬 처리 함수
-def process_row(row):
-    try:
-        doc = get_article_content(row['link'])
-        if not doc:
-            return None
-        parsed, _ = analyze_article_with_rag(doc)
-        parsed.update(row)
-        return parsed
-    except Exception as e:
-        print(f"[오류] {row['link']} 처리 실패: {e}")
-        return None
+# 기능 추가 : 선택한 링크만 분석 (1개)
+# 분석 단계 : 수집된 뉴스 본문 추출 및 LLM 분석
+def analyze_articles(target_link=None):
     
-# 분석 단계: 수집된 뉴스 본문 추출 및 LLM 분석
-def analyze_articles(target_date):
-    raw_path = os.path.join(DATA_DIR, f"{target_date}_news_raw.csv")
-
+    raw_path = os.path.join(DATA_DIR, "news_raw.csv")
     if not os.path.exists(raw_path):
         print(f"{raw_path} 파일이 존재하지 않습니다. 먼저 뉴스 수집을 수행해주세요.")
         return
 
     df = pd.read_csv(raw_path)
-    # Streamlit에서 슬라이더로 MAX_ANALYZE 받은 값만큼만 분석
-    max_analyze = int(os.environ.get("MAX_ANALYZE", len(df)))
-    df = df.head(max_analyze)
-    rows = df.to_dict(orient='records')
+    target_row = df[df['link'] == target_link].iloc[0]
 
-    print(f"분석 시작: {len(rows)}건 병렬 처리 (코어 수: {cpu_count()})")
-    with Pool(processes=cpu_count()) as pool:
-        results = list(pool.map(process_row, rows))
+    try:
+        doc = get_article_content(target_row['link'])        
+        results, _ = analyze_article_with_rag(doc)
+       
+        result_df = pd.DataFrame([results])
+        target_df = pd.DataFrame([target_row])
+        anal_df = pd.concat([target_df.reset_index(drop=True), result_df.reset_index(drop=True)], axis=1)
+        anal_df = anal_df[['title','link','keyword','pubDate','category','summary','crime_type','victim_features','damage','cause','response_type']]
 
-    results = [r for r in results if r]
-    if results:
-        result_df = pd.DataFrame(results)
-        filename = os.path.join(DATA_DIR, f"{target_date}_fraud_news.csv")
-        result_df.to_csv(filename, index=False, encoding='utf-8-sig')
-        print(f"분석 완료: {len(result_df)}건 저장됨 → {filename}")
+        anal_path = os.path.join(DATA_DIR, "news_raw_anal.csv")
+        if os.path.exists(anal_path):
+            o_anal_df = pd.read_csv(anal_path)
+            n_anal_df = pd.concat([o_anal_df, anal_df], ignore_index=True)
+        else:
+            n_anal_df = anal_df
+
+        n_anal_df.to_csv(anal_path, index=False, encoding='utf-8-sig')
+        print(f"분석 완료: {len(n_anal_df)}건 저장됨 → {anal_path}")
+
+        # results 행에 해당하는 df 의 is_flag = Y 로 업데이트         
+        df.loc[df['link'] == target_link, 'is_flag'] = 'Y'
+        df.to_csv(raw_path, index=False, encoding='utf-8-sig')
+
+    except Exception as e:
+        print(f"[오류] {target_row['link']} 처리 실패: {e}")
+
     else:
         print("분석 가능한 뉴스가 없습니다.")
 
@@ -206,9 +208,12 @@ if __name__ == "__main__":
         "--mode", choices=["collect", "analyze"], required=True, 
         help="작업 모드: collect 또는 analyze"
     )
+    parser.add_argument(
+        '--link', type=str, help='분석할 뉴스 링크'
+    )
     args = parser.parse_args()
 
     if args.mode == "collect":
         collect_articles(args.extra, args.month)
     elif args.mode == "analyze":
-        analyze_articles(args.month)
+        analyze_articles(args.link)

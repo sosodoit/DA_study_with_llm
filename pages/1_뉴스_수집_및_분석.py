@@ -55,15 +55,51 @@ st.sidebar.header("🔑 Naver API Key 입력")
 user_client_id = st.sidebar.text_input("Client ID", type="password")
 user_client_secret = st.sidebar.text_input("Client Secret", type="password")
 
-# ---------------------- 탭 구조 ----------------------
-tab1, tab2 = st.tabs(["1. 뉴스 수집", "2. 뉴스 분석"])
-
+# --------------------- 미리보기 -----------------------
 # 캐시된 파일 로드 함수
 def get_csv_data(path):
     @st.cache_data(ttl=300) # 캐시 유지 5분 
     def _load_csv(p):
         return pd.read_csv(p)
     return _load_csv(path)
+
+st.markdown("---")
+result_path = os.path.join("data", "news_raw.csv")
+
+if os.path.exists(result_path):
+    df = get_csv_data(result_path)
+
+    # 보기 좋게 전처리 
+    df['pubDate'] = pd.to_datetime(df['pubDate'])
+    df['pubDate'] = df['pubDate'].dt.strftime("%Y-%m-%d")
+    df = df.rename(columns={
+        "keyword": "KEYWORD",
+        "title": "TITLE",
+        "link": "URL",
+        "description": "DESC",
+        "pubDate": "PUB_DT",
+        "loadDate": "LOAD_DT",
+        "hostname": "HOST_NAME"
+    })
+
+    # 필터 UI 추가
+    with st.expander("필터 옵션", expanded=False):
+        keywords = list(set(DEFAULT_KEYWORDS + extra_keywords))            
+        selected_keywords = st.multiselect("키워드 필터", options=keywords, default=keywords[:5])
+
+        if 'PUB_DT' in df.columns:
+            date_range = st.date_input("기간 필터", [])
+            if len(date_range) == 2:
+                start, end = date_range
+                df = df[
+                    (pd.to_datetime(df['PUB_DT']) >= pd.to_datetime(start)) &
+                    (pd.to_datetime(df['PUB_DT']) <= pd.to_datetime(end))
+                ]
+
+        df = df[df['KEYWORD'].apply(lambda x: any(k in str(x) for k in selected_keywords))]
+        
+        st.write(f"총 {len(df)}건의 분석된 뉴스가 있습니다.")
+        st.dataframe(df[['PUB_DT','TITLE','KEYWORD','DESC','URL']].sort_values("PUB_DT", ascending=False).reset_index(drop=True))
 
 # ------------------ 수집 전 체크사항 ------------------
 def load_existing_news():
@@ -79,9 +115,11 @@ already_collected = (
     (existing_df['pubDate'].str.startswith(selected_month))
 ).any()
 
+tab1, tab2 = st.tabs(["1. 뉴스 수집", "2. 뉴스 분석"])
 # ------------------ Tab 1: 수집 단계 ------------------
 with tab1:    
-    if st.button("뉴스 수집 시작"):
+
+    if st.button("뉴스 수집 실행"):
 
         if already_collected:
             st.success("✅ 뉴스 수집 완료")
@@ -106,80 +144,36 @@ with tab1:
                     st.success("✅ 뉴스 수집 완료")
                 else:
                     st.error("❌ 수집 중 오류 발생")
-    
-    # 수집 결과 미리보기
-    st.markdown("---")
-    result_path = os.path.join("data", "news_raw.csv")
 
-    if os.path.exists(result_path):
-        df = get_csv_data(result_path)
-
-        # 보기 좋게 전처리 
-        df['pubDate'] = pd.to_datetime(df['pubDate'])
-        df['pubDate'] = df['pubDate'].dt.strftime("%Y-%m-%d")
-        df = df.rename(columns={
-            "keyword": "KEYWORD",
-            "title": "TITLE",
-            "link": "URL",
-            "description": "DESC",
-            "pubDate": "PUB_DT",
-            "loadDate": "LOAD_DT",
-            "hostname": "HOST_NAME"
-        })
-        df = df[['PUB_DT','TITLE','KEYWORD','DESC','URL']]
-
-        # 필터 UI 추가
-        with st.expander("필터 옵션", expanded=False):
-            keywords = list(set(DEFAULT_KEYWORDS + extra_keywords))            
-            selected_keywords = st.multiselect("키워드 필터", options=keywords, default=keywords[:5])
-
-            if 'PUB_DT' in df.columns:
-                date_range = st.date_input("기간 필터", [])
-                if len(date_range) == 2:
-                    start, end = date_range
-                    df = df[
-                        (pd.to_datetime(df['PUB_DT']) >= pd.to_datetime(start)) &
-                        (pd.to_datetime(df['PUB_DT']) <= pd.to_datetime(end))
-                    ]
-
-            df = df[df['KEYWORD'].apply(lambda x: any(k in str(x) for k in selected_keywords))]
-            
-            st.write(f"총 {len(df)}건의 분석된 뉴스가 있습니다.")
-            st.dataframe(df.sort_values("PUB_DT", ascending=False).reset_index(drop=True))
     else:
-        st.info("수집된 뉴스가 없습니다. 먼저 수집을 실행해주세요.")
+        st.info("뉴스 수집을 실행해주세요.")
 
 # ------------------ Tab 2: 분석 단계 ------------------
 with tab2:
-    raw_path = os.path.join("data", f"{selected_month}_news_raw.csv")
-    if os.path.exists(raw_path):
-        raw_df = get_csv_data(raw_path)
-        st.info(f"현재 수집된 뉴스 개수: {len(raw_df)}건")
-        analyze_count = st.slider("분석할 기사 수 (최대)", min_value=1, max_value=len(raw_df), value=min(100, len(raw_df)))
+    # 분석되지 않은 뉴스만 선택 가능하도록 (추후에는 자신이 수집한 데이터 목록을)
+    unprocessed = df[df['is_flag'] == 'N']
+    selected_link = st.selectbox("🔗 분석할 뉴스 선택", options=unprocessed['URL'].tolist())
 
-        if st.button("뉴스 분석"):
-            script_path = os.path.join(BASE_DIR, "modules", "crawler.py")
-            os.environ["MAX_ANALYZE"] = str(analyze_count) 
-            cmd = [sys.executable, script_path, "--month", selected_month, "--mode", "analyze"]
+    if st.button("뉴스 분석 실행"):
+        script_path = os.path.join(BASE_DIR, "modules", "crawler.py")
+        cmd = [sys.executable, script_path, '--link', selected_link, "--mode", "analyze"]
 
-            st.write("🔄 분석 중입니다. 아래에 로그가 표시됩니다.")
-            with st.spinner("뉴스 분석 중..."):     
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                st.text_area("분석 로그", result.stdout + result.stderr, height=300)
+        st.write("🔄 분석 중입니다. 아래에 로그가 표시됩니다.")
+        with st.spinner("뉴스 분석 중..."):     
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            st.text_area("분석 로그", result.stdout + result.stderr, height=200)
 
-            if result.returncode == 0:
-                st.success("✅ 뉴스 분석 완료")
-            else:
-                st.error("❌ 분석 중 오류 발생")
-    else:
-        st.warning("수집된 뉴스가 없습니다. 먼저 수집을 실행해주세요.")
+        if result.returncode == 0:
+            st.success("✅ 뉴스 분석 완료")
+        else:
+            st.error("❌ 분석 중 오류 발생")
 
     # 분석 결과 미리보기
     st.markdown("---")
-    result_path = os.path.join("data", f"{selected_month}_fraud_news.csv")
+    result_path = os.path.join("data", "news_raw_anal.csv")
     if os.path.exists(result_path):
         df = get_csv_data(result_path)
         st.write(f"총 {len(df)}건의 분석된 뉴스가 있습니다.")
         st.dataframe(df.sort_values("pubDate", ascending=False).head(10))
     else:
-        st.info("아직 분석된 결과가 없습니다. 먼저 뉴스 수집과 분석을 실행해주세요.")
+        st.info("뉴스 분석을 실행해주세요.")
